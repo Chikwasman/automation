@@ -1,0 +1,8 @@
+{
+  "name": "football-automation",
+  "private": true,
+  "module": "worker.js",
+  "dependencies": {
+    "ethers": "^6.7.0"
+  }
+}

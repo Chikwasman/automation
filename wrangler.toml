@@ -1,0 +1,9 @@
+name = "football-automation"
+main = "worker.js"
+compatibility_date = "2024-01-01"
+
+[triggers]
+crons = ["*/10 * * * *"]  # every 10 minutes
+
+[vars]
+LEAGUE_IDS = "39,140,135,78,61,2,3"
