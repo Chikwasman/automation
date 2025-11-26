@@ -8,35 +8,53 @@ import { baseSepolia } from "viem/chains";
 
 import ABI from "./abi/FootballBettingHybrid.json";
 
-
-// ---- Utility ----
+// -------------------------------
+// Utility
+// -------------------------------
 function toUnix(ts) {
   return Math.floor(new Date(ts).getTime() / 1000);
 }
 
-// ---- Worker Entrypoint ----
+// Sleep utility for throttling
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// -------------------------------
+// Worker Entrypoint
+// -------------------------------
 export default {
   async scheduled(event, env, ctx) {
     return await runAutomation(env);
   },
-
   async fetch(req, env) {
     return new Response(
-      "Automation worker running on: " + new Date().toISOString()
+      "Football automation worker running — " + new Date().toISOString()
     );
   },
 };
 
-// ---- Automation ----
+// ===========================================================
+// SAFETY LIMITS FOR FREE PLAN
+// ===========================================================
+const DAILY_API_LIMIT = 100;
+
+// Safe rule: NEVER exceed 80/day
+const SAFE_LIMIT = 80;
+
+// For 3 leagues — fetch only 1 league per run
+// (ideal schedule: every 6 hours → 4 runs/day)
+const LEAGUE_ROTATION = ["39", "140", "2"]; // EPL, LaLiga, UCL
+
+// ===========================================================
+// MAIN AUTOMATION
+// ===========================================================
 async function runAutomation(env) {
-  console.log("🚀 Starting automation run:", new Date().toISOString());
+  console.log("🚀 Starting football automation:", new Date().toISOString());
 
   const {
     RAPIDAPI_KEY,
     RPC_URL,
     CONTRACT_ADDRESS,
     PRIVATE_KEY,
-    LEAGUE_IDS,
     DAYS_AHEAD = "7",
     BATCH_LIMIT = "10",
   } = env;
@@ -46,17 +64,11 @@ async function runAutomation(env) {
     return;
   }
 
-  // Convert env vars
-  const batchLimit = parseInt(BATCH_LIMIT);
-  const daysAhead = parseInt(DAYS_AHEAD);
-  const leagues = LEAGUE_IDS.split(",").map((x) => x.trim());
+  // Setup chain clients
+  const account = privateKeyToAccount(
+    PRIVATE_KEY.startsWith("0x") ? PRIVATE_KEY : "0x" + PRIVATE_KEY
+  );
 
-  // FIXED: Convert PRIVATE_KEY -> account object
-const account = privateKeyToAccount(
-  PRIVATE_KEY.startsWith("0x") ? PRIVATE_KEY : "0x" + PRIVATE_KEY
-);
-
-  // ---- Setup clients ----
   const publicClient = createPublicClient({
     chain: baseSepolia,
     transport: http(RPC_URL),
@@ -68,110 +80,175 @@ const account = privateKeyToAccount(
     transport: http(RPC_URL),
   });
 
-  const contract = {
-    address: CONTRACT_ADDRESS,
-    abi: ABI.abi,
-  };
+  const contract = { address: CONTRACT_ADDRESS, abi: ABI.abi };
 
-  // ---------------------------------------------
-  // Step 1: CREATE MATCHES
-  // ---------------------------------------------
-  let createdCount = 0;
+  // ===========================================================
+  // STEP 1: Pick ONE league this run (safe rotation)
+  // ===========================================================
+  const leagueIndex = getDailyLeagueIndex();
+  const leagueId = LEAGUE_ROTATION[leagueIndex];
 
-  for (const league of leagues) {
-    if (createdCount >= batchLimit) break;
+  console.log(`🔄 Today’s League Target → ${leagueId}`);
 
-    const fixtures = await fetchFixtures(env, league, daysAhead);
-    console.log(`Fetched ${fixtures.length} fixtures for league ${league}`);
+  // ===========================================================
+  // STEP 2: Check API remaining quota
+  // ===========================================================
+  const apiRemaining = await fetchApiUsage(env);
 
-    for (const fx of fixtures) {
-      if (createdCount >= batchLimit) break;
+  console.log(`📊 API Remaining Today: ${apiRemaining}`);
 
-      if (fx.status !== "NS") continue;
-
-      try {
-        const hash = await walletClient.writeContract({
-          address: CONTRACT_ADDRESS,
-          abi: ABI.abi,
-          functionName: "createMatch",
-          args: [fx.home, fx.away, fx.matchTime, String(fx.fixtureId)],
-        });
-
-        console.log(`🟢 Created match: ${fx.home} vs ${fx.away} | tx=${hash}`);
-        createdCount++;
-      } catch (err) {
-        console.log(
-          `⚠️ createMatch FAILED for fixture ${fx.fixtureId}:`,
-          JSON.stringify(err, null, 2)
-        );
-      }
-    }
+  if (apiRemaining < 5) {
+    console.log("⛔ Stopping — too close to daily limit.");
+    return;
   }
 
-  // ---------------------------------------------
-// Step 2: SETTLE MATCHES
-// ---------------------------------------------
-let nextMatchId = await publicClient.readContract({
-  ...contract,
-  functionName: "nextMatchId",
-});
+  // ===========================================================
+  // STEP 3: Create matches (safe throttled)
+  // ===========================================================
+  const created = await createMatches(env, leagueId, walletClient, contract, {
+    maxCreates: Number(BATCH_LIMIT),
+  });
 
-const now = Math.floor(Date.now() / 1000);
+  console.log(`🟢 Created matches this run: ${created}`);
 
-for (let i = 1; i < Number(nextMatchId); i++) {
-  try {
-    const m = await publicClient.readContract({
-      ...contract,
-      functionName: "matches",
-      args: [i],
-    });
-
-    const [
-      id,
-      home,
-      away,
-      matchTime,
-      outcome,
-      exists,
-      deleted,
-      externalMatchId,
-      settlementTime,
-      settlementMethod,
-      settledBy,
-      homeScore,
-      awayScore
-    ] = m;
-
-    if (!exists || deleted) continue;
-    if (Number(outcome) !== 0) continue;
-    if (Number(matchTime) + 7200 > now) continue;
-
-    console.log(`⏳ Settling match ${id}: ${home} vs ${away}`);
-
-    const result = await fetchScore(env, externalMatchId);
-
-    if (!result || result.status !== "finished") {
-      console.log("❌ Cannot settle yet — match not finished.");
-      continue;
-    }
-
-    const tx = await walletClient.writeContract({
-      ...contract,
-      functionName: "settleMatchOffChain",
-      args: [id, result.homeScore, result.awayScore],
-    });
-
-    console.log(`🟢 Settled match ${id} | tx=${tx}`);
-
-  } catch (e) {
-    console.log(`❌ Error settling match ${i}:`, JSON.stringify(e, null, 2));
-  }
-}
+  // ===========================================================
+  // STEP 4: Settle finished matches
+  // ===========================================================
+  const settled = await settleMatches(env, publicClient, walletClient, contract);
+  console.log(`🟢 Settled matches this run: ${settled}`);
 
   console.log("✨ Automation complete");
 }
 
-// ---- FETCH FIXTURES ----
+// ===========================================================
+// LEAGUE ROTATION (ensures 1 league/run)
+// ===========================================================
+function getDailyLeagueIndex() {
+  const day = new Date().getUTCDay(); // 0-6
+  return day % LEAGUE_ROTATION.length;
+}
+
+// ===========================================================
+// SAFELY CHECK FOOTBALL API USAGE
+// (Free plan returns usage when calling /status)
+// ===========================================================
+async function fetchApiUsage(env) {
+  try {
+    const res = await fetch("https://v3.football.api-sports.io/status", {
+      headers: {
+        "x-rapidapi-key": env.RAPIDAPI_KEY,
+        "x-rapidapi-host": "v3.football.api-sports.io",
+      },
+    });
+
+    const data = await res.json();
+
+    return data.response?.requests?.current ?? 0;
+  } catch (e) {
+    console.log("⚠️ Could not read API usage, assuming safe.");
+    return SAFE_LIMIT;
+  }
+}
+
+// ===========================================================
+// CREATE MATCHES (THROTTLED)
+// ===========================================================
+async function createMatches(env, leagueId, walletClient, contract, opts) {
+  const daysAhead = Number(env.DAYS_AHEAD || 7);
+  const maxCreates = opts.maxCreates || 10;
+
+  const fixtures = await fetchFixtures(env, leagueId, daysAhead);
+
+  console.log(`📅 Found ${fixtures.length} fixtures for league ${leagueId}`);
+
+  let created = 0;
+
+  for (const fx of fixtures) {
+    if (created >= maxCreates) break;
+
+    if (fx.status !== "NS") continue;
+
+    try {
+      const tx = await walletClient.writeContract({
+        ...contract,
+        functionName: "createMatch",
+        args: [fx.home, fx.away, fx.matchTime, String(fx.fixtureId)],
+      });
+
+      console.log(
+        `🟢 Created: ${fx.home} vs ${fx.away} | tx=${tx}`
+      );
+
+      created++;
+      await sleep(500); // throttle
+    } catch (err) {
+      console.log(
+        `⚠️ createMatch failed for ${fx.fixtureId}: ${err.message}`
+      );
+    }
+  }
+
+  return created;
+}
+
+// ===========================================================
+// SETTLE MATCHES
+// ===========================================================
+async function settleMatches(env, publicClient, walletClient, contract) {
+  let settled = 0;
+
+  const nextMatchId = await publicClient.readContract({
+    ...contract,
+    functionName: "nextMatchId",
+  });
+
+  const now = Math.floor(Date.now() / 1000);
+
+  for (let i = 1; i < Number(nextMatchId); i++) {
+    try {
+      const m = await publicClient.readContract({
+        ...contract,
+        functionName: "matches",
+        args: [i],
+      });
+
+      const [
+        id,
+        home,
+        away,
+        matchTime,
+        outcome,
+        exists,
+        deleted,
+        fixtureId,
+      ] = m;
+
+      if (!exists || deleted || outcome !== 0) continue;
+      if (matchTime + 7200 > now) continue;
+
+      const score = await fetchScore(env, fixtureId);
+      if (!score || score.status !== "finished") continue;
+
+      const tx = await walletClient.writeContract({
+        ...contract,
+        functionName: "settleMatchOffChain",
+        args: [id, score.homeScore, score.awayScore],
+      });
+
+      console.log(`🟢 Settled match ${id} | tx=${tx}`);
+      settled++;
+      await sleep(500);
+    } catch (e) {
+      console.log(`❌ Error settling match ${i}: ${e.message}`);
+    }
+  }
+
+  return settled;
+}
+
+// ===========================================================
+// FETCH FIXTURES (FREE SAFE)
+// ===========================================================
 async function fetchFixtures(env, leagueId, daysAhead) {
   const API = "https://v3.football.api-sports.io/fixtures";
 
@@ -181,6 +258,7 @@ async function fetchFixtures(env, leagueId, daysAhead) {
   const p1 = from.toISOString().split("T")[0];
   const p2 = to.toISOString().split("T")[0];
 
+  // FREE PLAN: NO ids=, NO multi leagues
   const url = `${API}?league=${leagueId}&from=${p1}&to=${p2}`;
 
   const res = await fetch(url, {
@@ -201,7 +279,9 @@ async function fetchFixtures(env, leagueId, daysAhead) {
   }));
 }
 
-// ---- FETCH FINAL SCORE ----
+// ===========================================================
+// FETCH SCORE (FREE SAFE)
+// ===========================================================
 async function fetchScore(env, fixtureId) {
   const url = `https://v3.football.api-sports.io/fixtures?id=${fixtureId}`;
 
