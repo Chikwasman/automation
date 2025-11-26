@@ -16,3 +16,10 @@ RAPIDAPI_KEY = "YOUR_RAPIDAPI_KEY"
 LEAGUE_IDS = "39,140,135,78,61,2,3"
 DAYS_AHEAD = "7"
 BATCH_LIMIT = "10"
+
+[observability]
+[observability.logs]
+enabled = false
+head_sampling_rate = 1
+invocation_logs = true
+persist = true
