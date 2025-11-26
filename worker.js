@@ -109,62 +109,64 @@ const account = privateKeyToAccount(
   }
 
   // ---------------------------------------------
-  // Step 2: SETTLE MATCHES
-  // ---------------------------------------------
-  let nextMatchId = await publicClient.readContract({
-    ...contract,
-    functionName: "nextMatchId",
-  });
+// Step 2: SETTLE MATCHES
+// ---------------------------------------------
+let nextMatchId = await publicClient.readContract({
+  ...contract,
+  functionName: "nextMatchId",
+});
 
-  const now = Math.floor(Date.now() / 1000);
+const now = Math.floor(Date.now() / 1000);
 
-  for (let i = 1; i < Number(nextMatchId); i++) {
-    try {
-      const m = await publicClient.readContract({
-        ...contract,
-        functionName: "matches",
-        args: [i],
-      });
+for (let i = 1; i < Number(nextMatchId); i++) {
+  try {
+    const m = await publicClient.readContract({
+      ...contract,
+      functionName: "matches",
+      args: [i],
+    });
 
-      const [
-        id,
-        home,
-        away,
-        matchTime,
-        outcome,
-        exists,
-        deleted,
-        externalMatchId,
-      ] = m;
+    const [
+      id,
+      home,
+      away,
+      matchTime,
+      outcome,
+      exists,
+      deleted,
+      externalMatchId,
+      settlementTime,
+      settlementMethod,
+      settledBy,
+      homeScore,
+      awayScore
+    ] = m;
 
-      if (!exists || deleted) continue;
-      if (outcome !== 0) continue;
+    if (!exists || deleted) continue;
+    if (Number(outcome) !== 0) continue;
+    if (Number(matchTime) + 7200 > now) continue;
 
-      if (matchTime + 7200 > now) continue;
+    console.log(`⏳ Settling match ${id}: ${home} vs ${away}`);
 
-      console.log(`⏳ Settling match ${id}: ${home} vs ${away}`);
+    const result = await fetchScore(env, externalMatchId);
 
-      const result = await fetchScore(env, externalMatchId);
-
-      if (!result || result.status !== "finished") {
-        console.log("❌ Cannot settle yet — match not finished.");
-        continue;
-      }
-
-      const tx = await walletClient.writeContract({
-        ...contract,
-        functionName: "settleMatchOffChain",
-        args: [id, result.homeScore, result.awayScore],
-      });
-
-      console.log(`🟢 Settled match ${id} | tx=${tx}`);
-    } catch (e) {
-      console.log(
-        `❌ Error settling match ${i}:`,
-        JSON.stringify(e, null, 2)
-      );
+    if (!result || result.status !== "finished") {
+      console.log("❌ Cannot settle yet — match not finished.");
+      continue;
     }
+
+    const tx = await walletClient.writeContract({
+      ...contract,
+      functionName: "settleMatchOffChain",
+      args: [id, result.homeScore, result.awayScore],
+    });
+
+    console.log(`🟢 Settled match ${id} | tx=${tx}`);
+
+  } catch (e) {
+    console.log(`❌ Error settling match ${i}:`, JSON.stringify(e, null, 2));
   }
+}
 
   console.log("✨ Automation complete");
 }
