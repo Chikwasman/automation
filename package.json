@@ -1,8 +1,11 @@
 {
-  "name": "matches-automation",
-  "private": true,
-  "module": "worker.js",
+  "name": "automation-worker",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy"
+  },
   "dependencies": {
-    "ethers": "^6.7.0"
+    "viem": "2.7.3"
   }
 }
