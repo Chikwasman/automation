@@ -1,5 +1,5 @@
 {
-  "name": "football-automation",
+  "name": "matches-automation",
   "private": true,
   "module": "worker.js",
   "dependencies": {
