@@ -1,13 +1,13 @@
-// automation/worker.js
 import {
   createPublicClient,
   createWalletClient,
   http,
-  parseAccount,
 } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
 import { baseSepolia } from "viem/chains";
 
 import ABI from "./abi/FootballBettingHybrid.json";
+
 
 // ---- Utility ----
 function toUnix(ts) {
@@ -51,8 +51,10 @@ async function runAutomation(env) {
   const daysAhead = parseInt(DAYS_AHEAD);
   const leagues = LEAGUE_IDS.split(",").map((x) => x.trim());
 
-  // ---- FIX: Wallet must use parseAccount ----
-  const account = parseAccount(PRIVATE_KEY);
+  // FIXED: Convert PRIVATE_KEY -> account object
+const account = privateKeyToAccount(
+  PRIVATE_KEY.startsWith("0x") ? PRIVATE_KEY : "0x" + PRIVATE_KEY
+);
 
   // ---- Setup clients ----
   const publicClient = createPublicClient({
