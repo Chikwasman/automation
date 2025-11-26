@@ -1,29 +1,20 @@
 // automation/worker.js
-// Cloudflare Worker - Fully Automated Match Creator + Settler
-// Chain: Base Sepolia
-
 import {
   createPublicClient,
   createWalletClient,
   http,
+  parseAccount,
 } from "viem";
 import { baseSepolia } from "viem/chains";
 
-// ----------------------------
-// Load ABI (embedded directly)
-// ----------------------------
 import ABI from "./abi/FootballBettingHybrid.json";
 
-// ----------------------------
-// Utility
-// ----------------------------
+// ---- Utility ----
 function toUnix(ts) {
   return Math.floor(new Date(ts).getTime() / 1000);
 }
 
-// ----------------------------
-// MAIN CRON WORKER
-// ----------------------------
+// ---- Worker Entrypoint ----
 export default {
   async scheduled(event, env, ctx) {
     return await runAutomation(env);
@@ -36,9 +27,7 @@ export default {
   },
 };
 
-// ----------------------------
-// AUTOMATION PIPELINE
-// ----------------------------
+// ---- Automation ----
 async function runAutomation(env) {
   console.log("🚀 Starting automation run:", new Date().toISOString());
 
@@ -57,25 +46,26 @@ async function runAutomation(env) {
     return;
   }
 
+  // Convert env vars
   const batchLimit = parseInt(BATCH_LIMIT);
   const daysAhead = parseInt(DAYS_AHEAD);
   const leagues = LEAGUE_IDS.split(",").map((x) => x.trim());
 
-  // ---------------------------------------------
-  // Setup viem clients
-  // ---------------------------------------------
+  // ---- FIX: Wallet must use parseAccount ----
+  const account = parseAccount(PRIVATE_KEY);
+
+  // ---- Setup clients ----
   const publicClient = createPublicClient({
     chain: baseSepolia,
     transport: http(RPC_URL),
   });
 
   const walletClient = createWalletClient({
-    account: PRIVATE_KEY,
+    account,
     chain: baseSepolia,
     transport: http(RPC_URL),
   });
 
-  // Contract instance
   const contract = {
     address: CONTRACT_ADDRESS,
     abi: ABI.abi,
@@ -90,10 +80,11 @@ async function runAutomation(env) {
     if (createdCount >= batchLimit) break;
 
     const fixtures = await fetchFixtures(env, league, daysAhead);
+    console.log(`Fetched ${fixtures.length} fixtures for league ${league}`);
+
     for (const fx of fixtures) {
       if (createdCount >= batchLimit) break;
 
-      // Skip if not NS (not started)
       if (fx.status !== "NS") continue;
 
       try {
@@ -101,21 +92,16 @@ async function runAutomation(env) {
           address: CONTRACT_ADDRESS,
           abi: ABI.abi,
           functionName: "createMatch",
-          args: [
-            fx.home,
-            fx.away,
-            fx.matchTime,
-            String(fx.fixtureId),
-          ],
+          args: [fx.home, fx.away, fx.matchTime, String(fx.fixtureId)],
         });
 
-        console.log(
-          `🟢 Created match: ${fx.home} vs ${fx.away} | tx=${hash}`
-        );
-
+        console.log(`🟢 Created match: ${fx.home} vs ${fx.away} | tx=${hash}`);
         createdCount++;
       } catch (err) {
-        console.log("⚠️ createMatch failed for fixture", fx.fixtureId, err);
+        console.log(
+          `⚠️ createMatch FAILED for fixture ${fx.fixtureId}:`,
+          JSON.stringify(err, null, 2)
+        );
       }
     }
   }
@@ -123,7 +109,7 @@ async function runAutomation(env) {
   // ---------------------------------------------
   // Step 2: SETTLE MATCHES
   // ---------------------------------------------
-  const nextMatchId = await publicClient.readContract({
+  let nextMatchId = await publicClient.readContract({
     ...contract,
     functionName: "nextMatchId",
   });
@@ -150,42 +136,38 @@ async function runAutomation(env) {
       ] = m;
 
       if (!exists || deleted) continue;
-      if (outcome !== 0) continue; // outcome 0 = pending
+      if (outcome !== 0) continue;
 
-      // must be 2+ hours past matchTime
       if (matchTime + 7200 > now) continue;
 
-      console.log(`⏳ Settling match ${id} ${home} vs ${away}`);
+      console.log(`⏳ Settling match ${id}: ${home} vs ${away}`);
 
-      // Fetch REAL WORLD result
       const result = await fetchScore(env, externalMatchId);
+
       if (!result || result.status !== "finished") {
         console.log("❌ Cannot settle yet — match not finished.");
         continue;
       }
 
-      const { homeScore, awayScore } = result;
-
-      // Settle off-chain
       const tx = await walletClient.writeContract({
         ...contract,
         functionName: "settleMatchOffChain",
-        args: [id, homeScore, awayScore],
+        args: [id, result.homeScore, result.awayScore],
       });
 
       console.log(`🟢 Settled match ${id} | tx=${tx}`);
-
     } catch (e) {
-      console.log(`❌ Error settling match ${i}`, e);
+      console.log(
+        `❌ Error settling match ${i}:`,
+        JSON.stringify(e, null, 2)
+      );
     }
   }
 
   console.log("✨ Automation complete");
 }
 
-// -------------------------------------------------
-// FETCH FIXTURES (RapidAPI)
-// -------------------------------------------------
+// ---- FETCH FIXTURES ----
 async function fetchFixtures(env, leagueId, daysAhead) {
   const API = "https://v3.football.api-sports.io/fixtures";
 
@@ -215,9 +197,7 @@ async function fetchFixtures(env, leagueId, daysAhead) {
   }));
 }
 
-// -------------------------------------------------
-// FETCH MATCH SCORE (after match ends)
-// -------------------------------------------------
+// ---- FETCH FINAL SCORE ----
 async function fetchScore(env, fixtureId) {
   const url = `https://v3.football.api-sports.io/fixtures?id=${fixtureId}`;
 
@@ -233,9 +213,7 @@ async function fetchScore(env, fixtureId) {
 
   if (!fx) return null;
 
-  const status = fx.fixture.status.short;
-
-  if (status === "FT") {
+  if (fx.fixture.status.short === "FT") {
     return {
       status: "finished",
       homeScore: fx.goals.home,
