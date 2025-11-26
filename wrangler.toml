@@ -5,15 +5,15 @@ compatibility_date = "2024-10-01"
 # NEW way to enable Node.js APIs (required for viem)
 compatibility_flags = ["nodejs_compat"]
 
-[triggers]
-crons = ["*/10 * * * *"]
+[schedules]
+  cron = "0 */6 * * *"
 
 [vars]
 RPC_URL = "YOUR_BASE_SEPOLIA_RPC"
 CONTRACT_ADDRESS = "YOUR_CONTRACT"
 PRIVATE_KEY = "0xYOUR_PRIVATE_KEY"
 RAPIDAPI_KEY = "YOUR_RAPIDAPI_KEY"
-LEAGUE_IDS = "39,140,135,78,61,2,3"
+LEAGUE_IDS="39,140,2"
 DAYS_AHEAD = "7"
 BATCH_LIMIT = "10"
 
