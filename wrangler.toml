@@ -9,10 +9,9 @@ compatibility_flags = ["nodejs_compat"]
 crons = ["0 */6 * * *"]
 
 [vars]
-RPC_URL = "YOUR_BASE_SEPOLIA_RPC"
-CONTRACT_ADDRESS = "YOUR_CONTRACT"
-PRIVATE_KEY = "0xYOUR_PRIVATE_KEY"
-RAPIDAPI_KEY = "YOUR_RAPIDAPI_KEY"
-DAYS_AHEAD = "7"
-BATCH_LIMIT = "10"
+RPC_URL="https://sepolia.base.org"
+CONTRACT_ADDRESS="0xYourContractAddress"
+PRIVATE_KEY="YourPrivateKey"
+DAYS_AHEAD="3"
+BATCH_LIMIT="10"
 crons = ["*/10 * * * *"]

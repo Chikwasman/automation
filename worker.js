@@ -8,61 +8,62 @@ import { baseSepolia } from "viem/chains";
 
 import ABI from "./abi/FootballBettingHybrid.json";
 
-// ---- Utility ----
+// ------------------------------
+// Utility
+// ------------------------------
 function toUnix(ts) {
   return Math.floor(new Date(ts).getTime() / 1000);
 }
 
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
+const SCOREBAT_URL = "https://www.scorebat.com/video-api/v3/";
 
-// ---- Worker Entrypoint ----
+// ------------------------------
+// Worker Entrypoint
+// ------------------------------
 export default {
   async scheduled(event, env, ctx) {
-    return await runAutomation(env);
+    return await run(env);
   },
-
-  async fetch(req, env) {
-    return new Response("Automation worker running: " + new Date().toISOString());
+  async fetch(req) {
+    return new Response("ScoreBat Automation Worker Active");
   },
 };
 
-// ---- Automation ----
-async function runAutomation(env) {
-  console.log("🚀 Starting automation run:", new Date().toISOString());
+// ------------------------------
+// MAIN AUTOMATION RUN
+// ------------------------------
+async function run(env) {
+  console.log("🚀 Run:", new Date().toISOString());
 
   const {
     RPC_URL,
     CONTRACT_ADDRESS,
     PRIVATE_KEY,
-    DAYS_AHEAD = "7",
+    DAYS_AHEAD = "3",
     BATCH_LIMIT = "10",
   } = env;
 
   if (!RPC_URL || !CONTRACT_ADDRESS || !PRIVATE_KEY) {
-    console.log("❌ Missing environment variables");
+    console.log("❌ Missing env vars");
     return;
   }
 
-  const leagues = ["39", "140", "2"]; // EPL, La Liga, UCL
   const daysAhead = parseInt(DAYS_AHEAD);
   const batchLimit = parseInt(BATCH_LIMIT);
 
-  // Account from private key
+  // Wallet → Contract
   const account = privateKeyToAccount(
     PRIVATE_KEY.startsWith("0x") ? PRIVATE_KEY : "0x" + PRIVATE_KEY
   );
 
-  // Setup clients
   const publicClient = createPublicClient({
     chain: baseSepolia,
     transport: http(RPC_URL),
   });
 
   const walletClient = createWalletClient({
-    account,
     chain: baseSepolia,
+    account,
     transport: http(RPC_URL),
   });
 
@@ -71,162 +72,153 @@ async function runAutomation(env) {
     abi: ABI.abi,
   };
 
-  // ---------------------------------------------
-  // 1. CREATE MATCHES
-  // ---------------------------------------------
-  let createdCount = 0;
+  // ------------------------------
+  // STEP 1 — FETCH ScoreBat fixtures
+  // ------------------------------
+  const matches = await fetchScoreBatFixtures();
+  console.log(`📌 ScoreBat returned ${matches.length} events`);
 
-  for (const league of leagues) {
-    if (createdCount >= batchLimit) break;
+  let created = 0;
 
-    const fixtures = await fetchFixturesFree(league, daysAhead);
-    console.log(`📌 Fixtures fetched for league ${league}: ${fixtures.length}`);
+  for (const m of matches) {
+    if (created >= batchLimit) break;
 
-    for (const fx of fixtures) {
-      if (createdCount >= batchLimit) break;
-      if (fx.status !== "NS") continue;
+    // Only future matches
+    if (m.start < Date.now() / 1000) continue;
 
-      try {
-        const hash = await walletClient.writeContract({
-          ...contract,
-          functionName: "createMatch",
-          args: [fx.home, fx.away, fx.matchTime, String(fx.fixtureId)],
-        });
+    try {
+      const tx = await walletClient.writeContract({
+        ...contract,
+        functionName: "createMatch",
+        args: [
+          m.home,
+          m.away,
+          m.start,
+          m.id.toString(),
+        ],
+      });
 
-        console.log(`🟢 Created match: ${fx.home} vs ${fx.away} | tx=${hash}`);
-        createdCount++;
-
-        await sleep(500); // throttle
-      } catch (err) {
-        console.log(
-          `⚠️ createMatch FAILED for fixture ${fx.fixtureId}:`,
-          JSON.stringify(err)
-        );
-      }
+      console.log(`🟢 Created: ${m.home} vs ${m.away}`);
+      created++;
+    } catch (err) {
+      console.log("⚠️ createMatch error", err.message);
     }
-
-    await sleep(800); // extra throttle
   }
 
-  // ---------------------------------------------
-  // 2. SETTLE MATCHES
-  // ---------------------------------------------
+  // ------------------------------
+  // STEP 2 — SETTLE overdue matches
+  // ------------------------------
   const nextMatchId = await publicClient.readContract({
     ...contract,
     functionName: "nextMatchId",
   });
 
-  const now = Math.floor(Date.now() / 1000);
-
-  for (let i = 1; i < Number(nextMatchId); i++) {
+  for (let id = 1; id < Number(nextMatchId); id++) {
     try {
       const m = await publicClient.readContract({
         ...contract,
         functionName: "matches",
-        args: [i],
+        args: [id],
       });
 
-      const [id, home, away, matchTime, outcome, exists, deleted, externalId] = m;
+      const [
+        matchId,
+        home,
+        away,
+        matchTime,
+        outcome,
+        exists,
+        deleted,
+        externalMatchId,
+      ] = m;
 
       if (!exists || deleted) continue;
       if (outcome !== 0) continue;
-      if (matchTime + 7200 > now) continue;
+      if (matchTime + 7200 > Date.now() / 1000) continue;
 
-      console.log(`⏳ Checking result for match ${id}: ${home} vs ${away}`);
+      console.log(`⏳ Checking final score for match ${matchId}`);
 
-      const result = await fetchScoreFree(externalId);
+      const score = await fetchScoreBatScore(externalMatchId);
 
-      if (!result || result.status !== "finished") {
-        console.log("⌛ Not finished yet.");
+      if (!score || score.status !== "finished") {
+        console.log("❌ Not finished yet");
         continue;
       }
 
       const tx = await walletClient.writeContract({
         ...contract,
         functionName: "settleMatchOffChain",
-        args: [id, result.homeScore, result.awayScore],
+        args: [matchId, score.home, score.away],
       });
 
-      console.log(`🟢 Settled match ${id} | tx=${tx}`);
+      console.log(`✅ Settled match ${matchId} | tx=${tx}`);
 
-      await sleep(500);
     } catch (e) {
-      console.log(`❌ Error settling match ${i}:`, JSON.stringify(e));
+      console.log(`❌ Error settling match ${id}:`, e.message);
     }
   }
 
-  console.log("✨ Automation complete");
+  console.log("✨ Done");
 }
 
-// ---- FIXTURES (FREE MIRROR API) ----
-async function fetchFixtures(env, leagueId, daysAhead) {
-  const API = "https://v3.football.api-sports.io/fixtures";
-
-  const from = new Date();
-  const to = new Date(Date.now() + daysAhead * 86400000);
-
-  const p1 = from.toISOString().split("T")[0];
-  const p2 = to.toISOString().split("T")[0];
-
-  const url = `${API}?league=${leagueId}&from=${p1}&to=${p2}`;
-
-  let raw;
+// ------------------------------
+// FETCH Fixtures from ScoreBat
+// ------------------------------
+async function fetchScoreBatFixtures() {
   try {
-    raw = await fetch(url, {
-      headers: {
-        "x-rapidapi-key": env.RAPIDAPI_KEY,
-        "x-rapidapi-host": "v3.football.api-sports.io",
-      },
-    });
+    const res = await fetch(SCOREBAT_URL);
+    const json = await res.json();
+
+    const games = json.response || [];
+
+    const output = [];
+
+    for (const g of games) {
+      if (!g.competition) continue;
+      if (!g.title.includes(" - ")) continue;
+
+      const [home, away] = g.title.split(" - ");
+
+      output.push({
+        id: g.id,
+        home,
+        away,
+        start: toUnix(g.date),
+      });
+    }
+
+    return output;
   } catch (e) {
-    console.log(`❌ Network error fetching league ${leagueId}:`, e);
+    console.log("❌ ScoreBat fetch error:", e.message);
     return [];
   }
-
-  let text = await raw.text();
-
-  // 🔥 FIX: Try JSON safely
-  let json;
-  try {
-    json = JSON.parse(text);
-  } catch (e) {
-    console.log(`❌ Invalid JSON for league ${leagueId}:`, text.slice(0, 200));
-    return [];
-  }
-
-  if (!json.response) {
-    console.log(
-      `⚠️ No response field for league ${leagueId}. Possible API limit or blocked request.`
-    );
-    return [];
-  }
-
-  return json.response.map((f) => ({
-    fixtureId: f.fixture.id,
-    home: f.teams.home.name,
-    away: f.teams.away.name,
-    matchTime: toUnix(f.fixture.date),
-    status: f.fixture.status.short,
-  }));
 }
 
-// ---- SCORE (FREE MIRROR API) ----
-async function fetchScoreFree(fixtureId) {
-  const API = `https://api-football-v1.p.rapidapi-mirror.com/v3/fixtures?id=${fixtureId}`;
+// ------------------------------
+// FETCH final score from ScoreBat
+// ------------------------------
+async function fetchScoreBatScore(id) {
+  try {
+    const res = await fetch(SCOREBAT_URL);
+    const json = await res.json();
 
-  const res = await fetch(API);
-  const data = await res.json();
+    const entry = (json.response || []).find(x => x.id === id);
 
-  const fx = data.response?.[0];
-  if (!fx) return null;
+    if (!entry) return null;
 
-  if (fx.fixture.status.short === "FT") {
+    const final = entry.videos?.[0]?.title ?? "";
+    const scoreMatch = final.match(/(\d+)\s*-\s*(\d+)/);
+
+    if (!scoreMatch) return { status: "pending" };
+
     return {
       status: "finished",
-      homeScore: fx.goals.home,
-      awayScore: fx.goals.away,
+      home: Number(scoreMatch[1]),
+      away: Number(scoreMatch[2]),
     };
-  }
 
-  return { status: "pending" };
+  } catch (e) {
+    console.log("❌ Score fetch error:", e.message);
+    return null;
+  }
 }
