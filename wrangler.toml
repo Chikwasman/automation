@@ -13,14 +13,6 @@ RPC_URL = "YOUR_BASE_SEPOLIA_RPC"
 CONTRACT_ADDRESS = "YOUR_CONTRACT"
 PRIVATE_KEY = "0xYOUR_PRIVATE_KEY"
 RAPIDAPI_KEY = "YOUR_RAPIDAPI_KEY"
-LEAGUE_IDS="39,140,2"
 DAYS_AHEAD = "7"
 BATCH_LIMIT = "10"
-crons = ["0 */6 * * *"]
-
-[observability]
-[observability.logs]
-enabled = false
-head_sampling_rate = 1
-invocation_logs = true
-persist = true
+crons = ["*/10 * * * *"]
