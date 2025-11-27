@@ -1,26 +1,18 @@
 name = "matches-automation"
 main = "worker.js"
-compatibility_date = "2024-10-01"
+compatibility_date = "2024-11-01"
+workers_dev = true
 
-# NEW way to enable Node.js APIs (required for viem)
-compatibility_flags = ["nodejs_compat"]
-
-[schedules]
-crons = ["0 */6 * * *"]
-
-[vars]
-RPC_URL="https://sepolia.base.org"
-CONTRACT_ADDRESS="0xYourContractAddress"
-PRIVATE_KEY="YourPrivateKey"
-DAYS_AHEAD="3"
-BATCH_LIMIT="10"
+[triggers]
 crons = ["*/10 * * * *"]
-
-kv_namespaces = [
-  { binding = "MATCHES", id = "your_id_here", preview_id = "your_preview_id_here" }
-]
 
 [[kv_namespaces]]
 binding = "MATCHES"
 id = "e02bc61716794309a83cb21a457ded38"
 preview_id = "e02bc61716794309a83cb21a457ded38"
+
+[vars]
+SCOREBAT_KEY = "YOUR_KEY"
+RPC_URL = "YOUR_RPC_URL"
+CONTRACT_ADDRESS = "0x..."
+PRIVATE_KEY = "0x..."
