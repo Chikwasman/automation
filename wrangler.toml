@@ -15,3 +15,7 @@ PRIVATE_KEY="YourPrivateKey"
 DAYS_AHEAD="3"
 BATCH_LIMIT="10"
 crons = ["*/10 * * * *"]
+
+kv_namespaces = [
+  { binding = "MATCHES", id = "your_id_here", preview_id = "your_preview_id_here" }
+]
