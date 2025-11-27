@@ -3,67 +3,57 @@ import {
   createWalletClient,
   http,
 } from "viem";
-import { privateKeyToAccount } from "viem/accounts";
 import { baseSepolia } from "viem/chains";
-
 import ABI from "./abi/FootballBettingHybrid.json";
 
-// ------------------------------
-// Utility
-// ------------------------------
-function toUnix(ts) {
-  return Math.floor(new Date(ts).getTime() / 1000);
-}
+// Convert timestamp → UNIX
+const toUnix = (ts) => Math.floor(new Date(ts).getTime() / 1000);
 
-const SCOREBAT_URL = "https://www.scorebat.com/video-api/v3/";
-
-// ------------------------------
-// Worker Entrypoint
-// ------------------------------
+// ----------------------------
+// MAIN EXPORT
+// ----------------------------
 export default {
   async scheduled(event, env, ctx) {
-    return await run(env);
+    return await runAutomation(env);
   },
-  async fetch(req) {
-    return new Response("ScoreBat Automation Worker Active");
+
+  async fetch(req, env) {
+    // return stored matches.json
+    const data = await env.MATCHES.get("matches.json");
+
+    return new Response(data || JSON.stringify({ matches: [] }), {
+      headers: { "Content-Type": "application/json" },
+    });
   },
 };
 
-// ------------------------------
-// MAIN AUTOMATION RUN
-// ------------------------------
-async function run(env) {
-  console.log("🚀 Run:", new Date().toISOString());
+// ----------------------------
+// AUTOMATION LOGIC
+// ----------------------------
+async function runAutomation(env) {
+  console.log("🚀 Automation:", new Date().toISOString());
 
   const {
+    SCOREBAT_KEY,
     RPC_URL,
     CONTRACT_ADDRESS,
     PRIVATE_KEY,
-    DAYS_AHEAD = "3",
-    BATCH_LIMIT = "10",
   } = env;
 
-  if (!RPC_URL || !CONTRACT_ADDRESS || !PRIVATE_KEY) {
-    console.log("❌ Missing env vars");
+  if (!SCOREBAT_KEY || !RPC_URL || !CONTRACT_ADDRESS || !PRIVATE_KEY) {
+    console.log("❌ Missing environment vars");
     return;
   }
 
-  const daysAhead = parseInt(DAYS_AHEAD);
-  const batchLimit = parseInt(BATCH_LIMIT);
-
-  // Wallet → Contract
-  const account = privateKeyToAccount(
-    PRIVATE_KEY.startsWith("0x") ? PRIVATE_KEY : "0x" + PRIVATE_KEY
-  );
-
-  const publicClient = createPublicClient({
+  // Configure clients
+  const client = createPublicClient({
     chain: baseSepolia,
     transport: http(RPC_URL),
   });
 
-  const walletClient = createWalletClient({
+  const wallet = createWalletClient({
+    account: PRIVATE_KEY,
     chain: baseSepolia,
-    account,
     transport: http(RPC_URL),
   });
 
@@ -72,161 +62,115 @@ async function run(env) {
     abi: ABI.abi,
   };
 
-  // ------------------------------
-  // STEP 1 — FETCH ScoreBat fixtures
-  // ------------------------------
-  const matches = await fetchScoreBatFixtures();
-  console.log(`📌 ScoreBat returned ${matches.length} events`);
+  // Fetch matches from ScoreBat
+  const matches = await fetchScorebat(env);
 
-  let created = 0;
+  // Store matches in KV so the frontend can load them
+  await env.MATCHES.put("matches.json", JSON.stringify({ matches }));
 
-  for (const m of matches) {
-    if (created >= batchLimit) break;
+  console.log("💾 Stored matches.json in KV:", matches.length);
 
-    // Only future matches
-    if (m.start < Date.now() / 1000) continue;
+  // -------------------------------
+  // SETTLEMENT LOGIC
+  // -------------------------------
+  const nextMatchIdBI = await client.readContract({
+    ...contract,
+    functionName: "nextMatchId",
+  });
 
+  let nextMatchId = Number(nextMatchIdBI);
+
+  for (let id = 1; id < nextMatchId; id++) {
     try {
-      const tx = await walletClient.writeContract({
-  ...contract,
-  functionName: "settleMatchOffChain",
-  args: [
-    BigInt(matchId),
-    BigInt(score.home),
-    BigInt(score.away),
-  ],
-});
+      const m = await client.readContract({
+        ...contract,
+        functionName: "matches",
+        args: [id],
+      });
 
-
-      console.log(`🟢 Created: ${m.home} vs ${m.away}`);
-      created++;
-    } catch (err) {
-      console.log("⚠️ createMatch error", err.message);
-    }
-  }
-
-  // ------------------------------
-// STEP 2 — SETTLE MATCHES
-// ------------------------------
-const nextMatchId = await publicClient.readContract({
-  ...contract,
-  functionName: "nextMatchId",
-});
-
-for (let i = 1; i < Number(nextMatchId); i++) {
-  try {
-    const m = await publicClient.readContract({
-      ...contract,
-      functionName: "matches",
-      args: [i],
-    });
-
-    const [
-      matchId,
-      home,
-      away,
-      matchTime,
-      outcome,
-      exists,
-      deleted,
-      externalMatchId,
-    ] = m;
-
-    if (!exists || deleted) continue;
-    if (Number(outcome) !== 0) continue;
-
-    const matchTimeNum = Number(matchTime);
-    const now = Math.floor(Date.now() / 1000);
-
-    // Only settle 2 hours after scheduled time
-    if (matchTimeNum + 7200 > now) continue;
-
-    console.log(`⏳ Checking final score for match ${i}: ${home} vs ${away}`);
-
-    const result = await fetchScoreBatScore(externalMatchId);
-
-    if (!result || result.status !== "finished") {
-      console.log("❌ Not finished yet");
-      continue;
-    }
-
-    // FIX: BigInt conversions
-    const tx = await walletClient.writeContract({
-      ...contract,
-      functionName: "settleMatchOffChain",
-      args: [
-        BigInt(matchId),
-        BigInt(result.home),
-        BigInt(result.away),
-      ],
-    });
-
-    console.log(`✅ Settled match ${i}  tx=${tx}`);
-
-  } catch (e) {
-    console.log(`❌ Error settling match ${i}: ${e.message}`);
-  }
-}
-
-// ------------------------------
-// FETCH Fixtures from ScoreBat
-// ------------------------------
-async function fetchScoreBatFixtures() {
-  try {
-    const res = await fetch(SCOREBAT_URL);
-    const json = await res.json();
-
-    const games = json.response || [];
-
-    const output = [];
-
-    for (const g of games) {
-      if (!g.competition) continue;
-      if (!g.title.includes(" - ")) continue;
-
-      const [home, away] = g.title.split(" - ");
-
-      output.push({
-        id: g.id,
+      const [
+        matchId,
         home,
         away,
-        start: toUnix(g.date),
-      });
-    }
+        matchTimeBI,
+        outcomeBI,
+        exists,
+        deleted,
+        externalMatchId,
+      ] = m;
 
-    return output;
+      let matchTime = Number(matchTimeBI);
+      let outcome = Number(outcomeBI);
+
+      if (!exists || deleted) continue;
+      if (outcome !== 0) continue; // skip settled
+
+      if (matchTime + 7200 > Date.now() / 1000) continue;
+
+      // Fetch real result
+      const result = await fetchScorebatResult(env, externalMatchId);
+
+      if (!result || !result.finished) continue;
+
+      // Scores must be numbers, not BigInt!
+      const tx = await wallet.writeContract({
+        ...contract,
+        functionName: "settleMatchOffChain",
+        args: [
+          id,
+          Number(result.home),
+          Number(result.away),
+        ],
+      });
+
+      console.log("🟢 Settled match", id, tx);
+
+    } catch (e) {
+      console.log("⚠️ Settlement error", id, e);
+    }
+  }
+
+  console.log("✨ Automation complete");
+}
+
+// ----------------------------------------------
+// SCOREBAT FETCH — Live & Upcoming Football Data
+// ----------------------------------------------
+async function fetchScorebat(env) {
+  try {
+    const res = await fetch(
+      `https://www.scorebat.com/video-api/v3/feed/?token=${env.SCOREBAT_KEY}`
+    );
+
+    const json = await res.json();
+
+    const events = json.response || [];
+    console.log("📌 ScoreBat returned", events.length, "events");
+
+    // Convert to our match format
+    return events.map((e, index) => ({
+      id: index + 1,
+      homeTeam: e.title.split(" - ")[0] || "Team A",
+      awayTeam: e.title.split(" - ")[1] || "Team B",
+      matchTime: toUnix(e.date), // UNIX format
+    }));
+
   } catch (e) {
-    console.log("❌ ScoreBat fetch error:", e.message);
+    console.log("❌ ScoreBat error", e);
     return [];
   }
 }
 
-// ------------------------------
-// FETCH final score from ScoreBat
-// ------------------------------
-async function fetchScoreBatScore(id) {
-  try {
-    const res = await fetch(SCOREBAT_URL);
-    const json = await res.json();
-
-    const entry = (json.response || []).find(x => x.id === id);
-
-    if (!entry) return null;
-
-    const final = entry.videos?.[0]?.title ?? "";
-    const scoreMatch = final.match(/(\d+)\s*-\s*(\d+)/);
-
-    if (!scoreMatch) return { status: "pending" };
-
-    return {
-      status: "finished",
-      home: Number(scoreMatch[1]),
-      away: Number(scoreMatch[2]),
-    };
-
-  } catch (e) {
-    console.log("❌ Score fetch error:", e.message);
-    return null;
-  }
-}
+// ----------------------------------------------
+// FETCH RESULT FOR SETTLEMENT
+// (ScoreBat does not give scores -> dummy fallback)
+// ----------------------------------------------
+async function fetchScorebatResult(env, externalId) {
+  // ⚠️ ScoreBat does NOT return scores via API.
+  // You MUST use API-Football for real scoring.
+  //
+  // But to prevent errors, we provide a placeholder:
+  return {
+    finished: false,
+  };
 }

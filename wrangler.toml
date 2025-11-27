@@ -19,3 +19,8 @@ crons = ["*/10 * * * *"]
 kv_namespaces = [
   { binding = "MATCHES", id = "your_id_here", preview_id = "your_preview_id_here" }
 ]
+
+[[kv_namespaces]]
+binding = "MATCHES"
+id = "e02bc61716794309a83cb21a457ded38"
+preview_id = "e02bc61716794309a83cb21a457ded38"
