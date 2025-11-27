@@ -88,15 +88,15 @@ async function run(env) {
 
     try {
       const tx = await walletClient.writeContract({
-        ...contract,
-        functionName: "createMatch",
-        args: [
-          m.home,
-          m.away,
-          m.start,
-          m.id.toString(),
-        ],
-      });
+  ...contract,
+  functionName: "settleMatchOffChain",
+  args: [
+    BigInt(matchId),
+    BigInt(score.home),
+    BigInt(score.away),
+  ],
+});
+
 
       console.log(`🟢 Created: ${m.home} vs ${m.away}`);
       created++;
@@ -106,59 +106,66 @@ async function run(env) {
   }
 
   // ------------------------------
-  // STEP 2 — SETTLE overdue matches
-  // ------------------------------
-  const nextMatchId = await publicClient.readContract({
-    ...contract,
-    functionName: "nextMatchId",
-  });
+// STEP 2 — SETTLE MATCHES
+// ------------------------------
+const nextMatchId = await publicClient.readContract({
+  ...contract,
+  functionName: "nextMatchId",
+});
 
-  for (let id = 1; id < Number(nextMatchId); id++) {
-    try {
-      const m = await publicClient.readContract({
-        ...contract,
-        functionName: "matches",
-        args: [id],
-      });
+for (let i = 1; i < Number(nextMatchId); i++) {
+  try {
+    const m = await publicClient.readContract({
+      ...contract,
+      functionName: "matches",
+      args: [i],
+    });
 
-      const [
-        matchId,
-        home,
-        away,
-        matchTime,
-        outcome,
-        exists,
-        deleted,
-        externalMatchId,
-      ] = m;
+    const [
+      matchId,
+      home,
+      away,
+      matchTime,
+      outcome,
+      exists,
+      deleted,
+      externalMatchId,
+    ] = m;
 
-      if (!exists || deleted) continue;
-      if (outcome !== 0) continue;
-      if (matchTime + 7200 > Date.now() / 1000) continue;
+    if (!exists || deleted) continue;
+    if (Number(outcome) !== 0) continue;
 
-      console.log(`⏳ Checking final score for match ${matchId}`);
+    const matchTimeNum = Number(matchTime);
+    const now = Math.floor(Date.now() / 1000);
 
-      const score = await fetchScoreBatScore(externalMatchId);
+    // Only settle 2 hours after scheduled time
+    if (matchTimeNum + 7200 > now) continue;
 
-      if (!score || score.status !== "finished") {
-        console.log("❌ Not finished yet");
-        continue;
-      }
+    console.log(`⏳ Checking final score for match ${i}: ${home} vs ${away}`);
 
-      const tx = await walletClient.writeContract({
-        ...contract,
-        functionName: "settleMatchOffChain",
-        args: [matchId, score.home, score.away],
-      });
+    const result = await fetchScoreBatScore(externalMatchId);
 
-      console.log(`✅ Settled match ${matchId} | tx=${tx}`);
-
-    } catch (e) {
-      console.log(`❌ Error settling match ${id}:`, e.message);
+    if (!result || result.status !== "finished") {
+      console.log("❌ Not finished yet");
+      continue;
     }
-  }
 
-  console.log("✨ Done");
+    // FIX: BigInt conversions
+    const tx = await walletClient.writeContract({
+      ...contract,
+      functionName: "settleMatchOffChain",
+      args: [
+        BigInt(matchId),
+        BigInt(result.home),
+        BigInt(result.away),
+      ],
+    });
+
+    console.log(`✅ Settled match ${i}  tx=${tx}`);
+
+  } catch (e) {
+    console.log(`❌ Error settling match ${i}: ${e.message}`);
+  }
 }
 
 // ------------------------------
@@ -221,4 +228,5 @@ async function fetchScoreBatScore(id) {
     console.log("❌ Score fetch error:", e.message);
     return null;
   }
+}
 }
