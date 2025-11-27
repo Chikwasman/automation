@@ -159,8 +159,8 @@ async function runAutomation(env) {
 }
 
 // ---- FIXTURES (FREE MIRROR API) ----
-async function fetchFixturesFree(leagueId, daysAhead) {
-  const API = "https://api-football-v1.p.rapidapi-mirror.com/v3/fixtures";
+async function fetchFixtures(env, leagueId, daysAhead) {
+  const API = "https://v3.football.api-sports.io/fixtures";
 
   const from = new Date();
   const to = new Date(Date.now() + daysAhead * 86400000);
@@ -170,10 +170,38 @@ async function fetchFixturesFree(leagueId, daysAhead) {
 
   const url = `${API}?league=${leagueId}&from=${p1}&to=${p2}`;
 
-  const res = await fetch(url);
-  const data = await res.json();
+  let raw;
+  try {
+    raw = await fetch(url, {
+      headers: {
+        "x-rapidapi-key": env.RAPIDAPI_KEY,
+        "x-rapidapi-host": "v3.football.api-sports.io",
+      },
+    });
+  } catch (e) {
+    console.log(`❌ Network error fetching league ${leagueId}:`, e);
+    return [];
+  }
 
-  return (data.response || []).map((f) => ({
+  let text = await raw.text();
+
+  // 🔥 FIX: Try JSON safely
+  let json;
+  try {
+    json = JSON.parse(text);
+  } catch (e) {
+    console.log(`❌ Invalid JSON for league ${leagueId}:`, text.slice(0, 200));
+    return [];
+  }
+
+  if (!json.response) {
+    console.log(
+      `⚠️ No response field for league ${leagueId}. Possible API limit or blocked request.`
+    );
+    return [];
+  }
+
+  return json.response.map((f) => ({
     fixtureId: f.fixture.id,
     home: f.teams.home.name,
     away: f.teams.away.name,
